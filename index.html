@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 :root{
   --spruce:#1B3A2F; --spruce2:#2E6A4F; --sage:#6E9B7A;
@@ -44,6 +45,7 @@ h1,h2,h3,.display{font-family:"Fraunces",Georgia,serif;font-weight:500;letter-sp
 .pillbtn:hover{border-color:var(--spruce2);color:var(--spruce)}
 .pillbtn.on{background:var(--spruce);color:#fff;border-color:var(--spruce)}
 #customizeBtn{display:none}
+.sync-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#8A8F8B;margin-right:2px}
 
 .wrap{max-width:1080px;margin:0 auto;padding:0 26px}
 section{position:relative}
@@ -212,6 +214,7 @@ body.admin .admin-only{display:revert}
   <span class="spacer"></span>
   <div class="ticker"><span class="lab">Committed this year</span><span class="val num" id="tickerVal">$0</span></div>
   <button class="pillbtn" id="customizeBtn">&#9881; Customize</button>
+  <span class="pillbtn" id="syncPill" style="cursor:default"><span class="sync-dot"></span>Local demo</span>
   <button class="pillbtn" id="lockBtn"><span id="lockIcon">&#128274;</span><span id="lockTxt">Admin</span></button>
 </header>
 
@@ -406,6 +409,21 @@ body.admin .admin-only{display:revert}
 
 const ADMIN_CODE = "lands26";
 
+/* ============================================================================
+   SUPABASE CONNECTION
+   Paste your two values between the quotes below, then re-upload this file.
+   Find them in Supabase: Project Settings > Data API.
+     SUPABASE_URL  = the Project URL (looks like https://xxxx.supabase.co)
+     SUPABASE_ANON = the anon public key (the long one labelled anon / public)
+   Leave them blank to keep running in local demo mode (data resets on refresh).
+   ============================================================================ */
+const SUPABASE_URL  = "https://wjjaxzqayjwtzkeljggf.supabase.co";
+const SUPABASE_ANON = "sb_publishable_ZvolLy5qep-PEjp_W6IsVw_MQ08mNi3";
+
+const USE_SUPABASE = !!(SUPABASE_URL && SUPABASE_ANON && window.supabase);
+const sb = USE_SUPABASE ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON) : null;
+let ADMIN_SESSION_CODE = "";
+
 const DEFAULT_CONFIG = {
   settings:{ budget:390716, currencyPrefix:"$" },
   theme:{
@@ -486,13 +504,65 @@ let ENTRIES = clone(DEFAULT_ENTRIES);
    DATA LAYER. In-memory for the demo. Swap the bodies for Supabase when live.
    --------------------------------------------------------------------------- */
 const Store = {
-  async loadConfig(){ /* return (await supabase.from('lands_finance_config').select('data').single()).data?.data */ return CONFIG; },
-  async saveConfig(){ /* await supabase.from('lands_finance_config').upsert({id:1,data:CONFIG}) */ return true; },
-  async loadEntries(){ /* return (await supabase.from('lands_finance_entries').select('*')).data */ return ENTRIES; },
-  async insertEntry(e){ ENTRIES.push(e); /* await supabase.from('lands_finance_entries').insert(e) */ return true; },
-  async updateEntry(i,e){ ENTRIES[i]=e; /* await supabase.from('lands_finance_entries').update(e).eq('id', e.id) */ return true; },
-  async deleteEntry(i){ ENTRIES.splice(i,1); /* await supabase.from('lands_finance_entries').delete().eq('id', id) */ return true; }
+  async loadConfig(){
+    if(!USE_SUPABASE) return CONFIG;
+    const {data,error}=await sb.from("lands_finance_config").select("data").eq("id",1).maybeSingle();
+    if(error) throw error;
+    if(data&&data.data) CONFIG=data.data;
+    return CONFIG;
+  },
+  async saveConfig(){
+    if(!USE_SUPABASE) return true;
+    const {error}=await sb.rpc("lf_save_config",{code:ADMIN_SESSION_CODE,p_data:CONFIG});
+    if(error){setSync("error");alert("Could not save settings: "+error.message);throw error;}
+    setSync("live"); return true;
+  },
+  async loadEntries(){
+    if(!USE_SUPABASE) return ENTRIES;
+    const {data,error}=await sb.from("lands_finance_entries").select("*").order("date",{ascending:true});
+    if(error) throw error;
+    ENTRIES=data.map(r=>({id:r.id,date:r.date,vendor:r.vendor,cat:r.cat,program:r.program,status:r.status,amount:Number(r.amount)}));
+    return ENTRIES;
+  },
+  async insertEntry(e){
+    if(!USE_SUPABASE){ ENTRIES.push(e); return true; }
+    const {error}=await sb.rpc("lf_add_entry",{code:ADMIN_SESSION_CODE,p_date:e.date,p_vendor:e.vendor,p_cat:e.cat,p_program:e.program,p_status:e.status,p_amount:e.amount});
+    if(error){setSync("error");alert("Could not save entry: "+error.message);throw error;}
+    await this.loadEntries(); return true;
+  },
+  async updateEntry(i,e){
+    if(!USE_SUPABASE){ ENTRIES[i]=e; return true; }
+    const id=ENTRIES[i].id;
+    const {error}=await sb.rpc("lf_update_entry",{code:ADMIN_SESSION_CODE,p_id:id,p_date:e.date,p_vendor:e.vendor,p_cat:e.cat,p_program:e.program,p_status:e.status,p_amount:e.amount});
+    if(error){setSync("error");alert("Could not update entry: "+error.message);throw error;}
+    await this.loadEntries(); return true;
+  },
+  async deleteEntry(i){
+    if(!USE_SUPABASE){ ENTRIES.splice(i,1); return true; }
+    const id=ENTRIES[i].id;
+    const {error}=await sb.rpc("lf_delete_entry",{code:ADMIN_SESSION_CODE,p_id:id});
+    if(error){setSync("error");alert("Could not remove entry: "+error.message);throw error;}
+    await this.loadEntries(); return true;
+  }
 };
+
+function setSync(state){
+  const pill=document.getElementById("syncPill"); if(!pill)return;
+  const map={connecting:["#C99A3E","Connecting"],live:["#2E6A4F","Live sync"],local:["#8A8F8B","Local demo"],error:["#B5475C","Sync issue"]};
+  const [c,label]=map[state]||map.local;
+  pill.innerHTML=`<span class="sync-dot" style="background:${c}"></span>${label}`;
+}
+function subscribeRealtime(){
+  if(!USE_SUPABASE)return;
+  try{
+    sb.channel("lf-live")
+      .on("postgres_changes",{event:"*",schema:"public",table:"lands_finance_entries"},async()=>{
+        try{await Store.loadEntries();renderAll();}catch(e){console.error(e);} })
+      .on("postgres_changes",{event:"*",schema:"public",table:"lands_finance_config"},async()=>{
+        try{await Store.loadConfig();refreshAll();}catch(e){console.error(e);} })
+      .subscribe();
+  }catch(e){console.error(e);}
+}
 
 /* ---------------------------------------------------------------------------
    COLOR HELPERS
@@ -786,9 +856,19 @@ function setAdmin(on){
   document.getElementById("entryLocked").style.display=on?"none":"block";
   if(!on)closeStudio();
 }
-function tryCode(){
-  if(document.getElementById("codeInput").value.trim()===ADMIN_CODE){setAdmin(true);closeModal();renderLedger();}
-  else setText("codeErr","That code did not match. Try again.");
+async function tryCode(){
+  const code=document.getElementById("codeInput").value.trim();
+  if(USE_SUPABASE){
+    try{
+      const {data,error}=await sb.rpc("lf_verify_admin",{code});
+      if(error) throw error;
+      if(data===true){ ADMIN_SESSION_CODE=code; setAdmin(true); closeModal(); renderLedger(); }
+      else setText("codeErr","That code did not match. Try again.");
+    }catch(e){ setText("codeErr","Could not reach the database. Check the connection."); }
+  }else{
+    if(code===ADMIN_CODE){ ADMIN_SESSION_CODE=code; setAdmin(true); closeModal(); renderLedger(); }
+    else setText("codeErr","That code did not match. Try again.");
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -991,7 +1071,7 @@ const io=("IntersectionObserver"in window)?new IntersectionObserver(es=>es.forEa
    INIT
    --------------------------------------------------------------------------- */
 const LOGO_SRC="data:image/png;base64,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";
-function init(){
+async function init(){
   document.getElementById("topLogo").src=LOGO_SRC;
   document.getElementById("footLogo").src=LOGO_SRC;
   document.getElementById("fDate").valueAsDate=new Date();
@@ -1012,6 +1092,11 @@ function init(){
   document.getElementById("runReport").onclick=buildReport;
   document.getElementById("exportCsv").onclick=exportCsv;
 
+  setSync(USE_SUPABASE?"connecting":"local");
+  if(USE_SUPABASE){
+    try{ await Store.loadConfig(); await Store.loadEntries(); setSync("live"); subscribeRealtime(); }
+    catch(e){ console.error(e); setSync("error"); }
+  }
   setAdmin(false);
   refreshAll();
   buildReport();
